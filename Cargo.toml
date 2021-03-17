@@ -1,0 +1,16 @@
+[package]
+name = "rjournald"
+version = "0.1.0"
+authors = ["Artemis Tosini <me@artem.ist>"]
+edition = "2018"
+license = "LGPL-2.1-or-later"
+
+[dependencies]
+byteorder = "1.4"
+num-traits = "0.2"
+num-derive = "0.3"
+anyhow = "1.0"
+bitflags = "1.2"
+memmap = "0.7"
+tokio = { version = "1.3", features = ["rt", "rt-multi-thread", "net", "fs", "io-std", "io-util", "macros"] }
+libc = "0.2"
