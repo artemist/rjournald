@@ -1,10 +1,10 @@
 // Binary format described in https://systemd.io/JOURNAL_FILE_FORMAT/
 
+use crate::util::ConstSliceExt;
 use anyhow::{anyhow, Context};
 use bitflags::bitflags;
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::FromPrimitive;
-use std::convert::TryInto;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Copy, Clone)]
@@ -68,14 +68,14 @@ pub enum State {
 
 impl Header {
     pub fn from_slice(source: &[u8]) -> anyhow::Result<Self> {
-        if &source[0..8] != "LPKSHHRH".as_bytes() {
+        if &source[0..8] != b"LPKSHHRH" {
             return Err(anyhow!("File does not contain magic number"));
         }
         if source.len() < 100 {
             return Err(anyhow!("Header too short"));
         }
 
-        let header_size = u64::from_le_bytes(source[88..96].try_into()?);
+        let header_size = u64::from_le_bytes(*source.const_slice(88));
         if header_size != 208 && header_size != 224 && header_size != 240 && header_size != 256 {
             return Err(anyhow!("Unknown header size {}", header_size));
         }
@@ -88,60 +88,60 @@ impl Header {
         }
 
         let compatible_flags =
-            CompatibleFlags::from_bits_truncate(u32::from_le_bytes(source[8..12].try_into()?));
+            CompatibleFlags::from_bits_truncate(u32::from_le_bytes(*source.const_slice(8)));
         let incompatible_flags =
-            IncompatibleFlags::from_bits(u32::from_le_bytes(source[12..16].try_into()?))
-                .ok_or(anyhow!("Unknown flags in header"))?;
+            IncompatibleFlags::from_bits(u32::from_le_bytes(*source.const_slice(12)))
+                .ok_or_else(|| anyhow!("Unknown flags in header"))?;
         let state = State::from_u8(source[16]).context(anyhow!("Invalid state in header"))?;
-        let file_id = source[24..40].try_into()?;
-        let machine_id = source[40..56].try_into()?;
-        let boot_id = source[56..72].try_into()?;
-        let seqnum_id = source[72..88].try_into()?;
+        let file_id = *source.const_slice(24);
+        let machine_id = *source.const_slice(40);
+        let boot_id = *source.const_slice(56);
+        let seqnum_id = *source.const_slice(72);
         // We got header_size earlier
-        let arena_size = u64::from_le_bytes(source[96..104].try_into()?);
-        let data_hash_table_offset = u64::from_le_bytes(source[104..112].try_into()?);
-        let data_hash_table_size = u64::from_le_bytes(source[112..120].try_into()?);
-        let field_hash_table_offset = u64::from_le_bytes(source[120..128].try_into()?);
-        let field_hash_table_size = u64::from_le_bytes(source[128..136].try_into()?);
-        let tail_object_offset = u64::from_le_bytes(source[136..144].try_into()?);
-        let n_objects = u64::from_le_bytes(source[144..152].try_into()?);
-        let n_entries = u64::from_le_bytes(source[152..160].try_into()?);
-        let tail_entry_seqnum = u64::from_le_bytes(source[160..168].try_into()?);
-        let head_entry_seqnum = u64::from_le_bytes(source[168..176].try_into()?);
-        let entry_array_offset = u64::from_le_bytes(source[176..184].try_into()?);
+        let arena_size = u64::from_le_bytes(*source.const_slice(96));
+        let data_hash_table_offset = u64::from_le_bytes(*source.const_slice(104));
+        let data_hash_table_size = u64::from_le_bytes(*source.const_slice(112));
+        let field_hash_table_offset = u64::from_le_bytes(*source.const_slice(120));
+        let field_hash_table_size = u64::from_le_bytes(*source.const_slice(128));
+        let tail_object_offset = u64::from_le_bytes(*source.const_slice(136));
+        let n_objects = u64::from_le_bytes(*source.const_slice(144));
+        let n_entries = u64::from_le_bytes(*source.const_slice(152));
+        let tail_entry_seqnum = u64::from_le_bytes(*source.const_slice(160));
+        let head_entry_seqnum = u64::from_le_bytes(*source.const_slice(168));
+        let entry_array_offset = u64::from_le_bytes(*source.const_slice(176));
         let head_entry_realtime =
-            UNIX_EPOCH + Duration::from_micros(u64::from_le_bytes(source[184..192].try_into()?));
+            UNIX_EPOCH + Duration::from_micros(u64::from_le_bytes(*source.const_slice(184)));
         let tail_entry_realtime =
-            UNIX_EPOCH + Duration::from_micros(u64::from_le_bytes(source[192..200].try_into()?));
+            UNIX_EPOCH + Duration::from_micros(u64::from_le_bytes(*source.const_slice(192)));
         let tail_entry_monotonic =
-            Duration::from_micros(u64::from_le_bytes(source[200..208].try_into()?));
+            Duration::from_micros(u64::from_le_bytes(*source.const_slice(200)));
 
         let (n_data, n_fields) = if header_size >= 224 {
             (
-                Some(u64::from_le_bytes(source[208..216].try_into()?)),
-                Some(u64::from_le_bytes(source[216..224].try_into()?)),
+                Some(u64::from_le_bytes(*source.const_slice(208))),
+                Some(u64::from_le_bytes(*source.const_slice(216))),
             )
         } else {
             (None, None)
         };
         let (n_tags, n_entry_arrays) = if header_size >= 240 {
             (
-                Some(u64::from_le_bytes(source[224..232].try_into()?)),
-                Some(u64::from_le_bytes(source[232..240].try_into()?)),
+                Some(u64::from_le_bytes(*source.const_slice(224))),
+                Some(u64::from_le_bytes(*source.const_slice(232))),
             )
         } else {
             (None, None)
         };
         let (data_hash_chain_depth, field_hash_chain_depth) = if header_size >= 256 {
             (
-                Some(u64::from_le_bytes(source[240..248].try_into()?)),
-                Some(u64::from_le_bytes(source[248..256].try_into()?)),
+                Some(u64::from_le_bytes(*source.const_slice(240))),
+                Some(u64::from_le_bytes(*source.const_slice(248))),
             )
         } else {
             (None, None)
         };
 
-        Ok(Header {
+        Ok(Self {
             compatible_flags,
             incompatible_flags,
             state,
