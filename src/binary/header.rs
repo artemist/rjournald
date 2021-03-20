@@ -5,7 +5,7 @@ use bitflags::bitflags;
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::FromPrimitive;
 use std::convert::TryInto;
-use std::time::{UNIX_EPOCH,Duration,SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Copy, Clone)]
 pub struct Header {
@@ -92,8 +92,7 @@ impl Header {
         let incompatible_flags =
             IncompatibleFlags::from_bits(u32::from_le_bytes(source[12..16].try_into()?))
                 .ok_or(anyhow!("Unknown flags in header"))?;
-        let state = State::from_u8(source[16])
-            .context(anyhow!("Invalid state in header"))?;
+        let state = State::from_u8(source[16]).context(anyhow!("Invalid state in header"))?;
         let file_id = source[24..40].try_into()?;
         let machine_id = source[40..56].try_into()?;
         let boot_id = source[56..72].try_into()?;
@@ -110,9 +109,12 @@ impl Header {
         let tail_entry_seqnum = u64::from_le_bytes(source[160..168].try_into()?);
         let head_entry_seqnum = u64::from_le_bytes(source[168..176].try_into()?);
         let entry_array_offset = u64::from_le_bytes(source[176..184].try_into()?);
-        let head_entry_realtime = UNIX_EPOCH + Duration::from_micros(u64::from_le_bytes(source[184..192].try_into()?));
-        let tail_entry_realtime = UNIX_EPOCH + Duration::from_micros(u64::from_le_bytes(source[192..200].try_into()?));
-        let tail_entry_monotonic = Duration::from_micros(u64::from_le_bytes(source[200..208].try_into()?));
+        let head_entry_realtime =
+            UNIX_EPOCH + Duration::from_micros(u64::from_le_bytes(source[184..192].try_into()?));
+        let tail_entry_realtime =
+            UNIX_EPOCH + Duration::from_micros(u64::from_le_bytes(source[192..200].try_into()?));
+        let tail_entry_monotonic =
+            Duration::from_micros(u64::from_le_bytes(source[200..208].try_into()?));
 
         let (n_data, n_fields) = if header_size >= 224 {
             (
@@ -167,7 +169,23 @@ impl Header {
             n_tags,
             n_entry_arrays,
             data_hash_chain_depth,
-            field_hash_chain_depth
+            field_hash_chain_depth,
         })
+    }
+
+    /// Write back to a slice
+    pub fn write_slice(&self, out: &mut [u8]) -> anyhow::Result<()> {
+        if self.header_size != 208
+            && self.header_size != 224
+            && self.header_size != 240
+            && self.header_size != 256
+        {
+            return Err(anyhow!("Unknown header size {}", self.header_size));
+        }
+        if (out.len() as u64) < self.header_size {
+            return Err(anyhow!("Output too short"));
+        }
+
+        unimplemented!("TODO or replace this entire function")
     }
 }
