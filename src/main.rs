@@ -1,7 +1,9 @@
+#![feature(unix_socket_ancillary_data)]
 #![feature(min_const_generics)]
 #![warn(clippy::pedantic, clippy::nursery, clippy::cargo)]
 
 mod binary;
+mod collector;
 mod util;
 
 #[allow(clippy::all)]
