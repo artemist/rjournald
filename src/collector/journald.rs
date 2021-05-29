@@ -2,13 +2,17 @@ use super::util::{bytes_availaible, setsockopt_int};
 use anyhow::{anyhow, Context};
 use async_io::Async;
 use libc::{gid_t, pid_t, uid_t, SOL_SOCKET, SO_PASSCRED};
-use std::os::unix::{
-    net::{AncillaryData, SocketAncillary, UnixDatagram},
-    prelude::AsRawFd,
-};
 use std::{
     borrow::Cow, cmp::max, collections::BTreeMap, io::IoSliceMut, os::unix::prelude::FromRawFd,
-    path::Path, sync::Arc,
+    path::Path, path::PathBuf, sync::Arc,
+};
+use std::{
+    os::unix::{
+        ffi::OsStringExt,
+        net::{AncillaryData, SocketAncillary, UnixDatagram},
+        prelude::AsRawFd,
+    },
+    str::FromStr,
 };
 use tokio::{fs::File, io::AsyncReadExt, sync::mpsc::Sender, task::spawn_blocking};
 
@@ -16,7 +20,7 @@ type Entry = BTreeMap<Cow<'static, str>, Box<[u8]>>;
 
 pub async fn listen_journald(
     socket_location: Box<Path>,
-    submission: Sender<()>,
+    submission: Sender<Entry>,
 ) -> anyhow::Result<()> {
     // We can't use Tokio for this as we need some special features
     let listener = Arc::new(
@@ -32,7 +36,15 @@ pub async fn listen_journald(
 
     loop {
         listener.readable().await?;
-        let message = read_message(listener.clone()).await;
+        let maybe_message = read_message(listener.clone()).await;
+        match maybe_message {
+            Ok(message) => submission.send(message).await?,
+            Err(e) => {
+                if cfg!(debug_assertions) {
+                    eprintln!("Failed to parse message with error {:?}", e);
+                }
+            }
+        }
     }
 }
 
@@ -106,21 +118,102 @@ async fn read_message(listener: Arc<Async<UnixDatagram>>) -> anyhow::Result<Entr
     // If we didn't get any fds just use what we received with recv
 
     let cred = &credentials[0];
-    parse_message(&buf, cred.get_pid(), cred.get_uid(), cred.get_gid())
+    parse_message(&buf, cred.get_pid(), cred.get_uid(), cred.get_gid()).await
 }
 
-fn parse_message(message: &[u8], pid: pid_t, uid: uid_t, gid: gid_t) -> anyhow::Result<Entry> {
-    let entry = Entry::new();
+async fn parse_message(
+    message: &[u8],
+    pid: pid_t,
+    uid: uid_t,
+    gid: gid_t,
+) -> anyhow::Result<Entry> {
+    let mut entry = Entry::new();
 
-    let field_name = Cow::Borrowed("");
-    let last_idx = 0usize;
+    let mut field_name: &[u8] = &[];
+    let mut last_idx = 0usize;
     for (idx, b) in message.iter().enumerate() {
-        if b == &b'=' && &field_name == "" {}
+        if b == &b'=' && field_name == b"" {
+            // We'll parse it as utf-8 later
+            field_name = &message[last_idx..idx];
+            // Skip the equals sign
+            last_idx = idx + 1;
+        }
+        if b == &b'\n' && field_name != b"" {
+            if field_name.len() > 0 && field_name[0] != b'_' {
+                if let Ok(field_name_str) = String::from_utf8(field_name.to_owned()) {
+                    entry.insert(
+                        Cow::Owned(field_name_str),
+                        field_name.to_owned().into_boxed_slice(),
+                    );
+                }
+            }
+        }
     }
+
+    // UID could be the EUID, SUID, or the RUID. I'm not sure what journald does but just doing
+    // what we're told sounds like a good start
+    entry.insert(
+        Cow::Borrowed(&"_PID"),
+        pid.to_string().into_bytes().into_boxed_slice(),
+    );
+    entry.insert(
+        Cow::Borrowed(&"_UID"),
+        uid.to_string().into_bytes().into_boxed_slice(),
+    );
+    entry.insert(
+        Cow::Borrowed(&"_GID"),
+        gid.to_string().into_bytes().into_boxed_slice(),
+    );
+    entry.insert(
+        Cow::Borrowed(&"_TRANSPORT"),
+        b"journal".to_vec().into_boxed_slice(),
+    );
 
     // If a process exits before we start grabbing info from /proc we could end up without any
     // information or with information for a different process. There doesn't seem to be a clean
     // way around this
+    let base_path = PathBuf::from_str(&format!("/proc/{}", pid))?;
+    if let Ok(exe) = tokio::fs::read_link(base_path.join(Path::new("exe"))).await {
+        entry.insert(
+            Cow::Borrowed(&"_EXE"),
+            exe.into_os_string().into_vec().into_boxed_slice(),
+        );
+    }
+
+    if let Ok(mut cmdline) = tokio::fs::read(base_path.join(Path::new("cmdline"))).await {
+        // The contents of /proc/*/cmdline always ends with a null byte which we don't want to pass through
+        cmdline.truncate(cmdline.len() - 1);
+        // For some reason systemd uses spaces to separate. We get null bytes so switch this
+        for b in cmdline.iter_mut() {
+            if *b == 0 {
+                *b = b' ';
+            }
+        }
+
+        entry.insert(Cow::Borrowed(&"_CMDLINE"), cmdline.into_boxed_slice());
+    }
+
+    if let Ok(mut comm) = tokio::fs::read(base_path.join(Path::new("comm"))).await {
+        // Remove the trailing \n
+        comm.truncate(comm.len() - 1);
+        entry.insert(Cow::Borrowed(&"_COMM"), comm.into_boxed_slice());
+    }
+
+    if let Ok(status) = tokio::fs::read_to_string(base_path.join("status")).await {
+        if let Some(cap) = status
+            .lines()
+            .filter_map(|line| line.split_once(":\t"))
+            .filter(|parts| parts.0 == "CapEff")
+            .map(|parts| parts.1.trim_start_matches('0'))
+            .map(|trimmed| if trimmed == "" { "0" } else { trimmed })
+            .next()
+        {
+            entry.insert(
+                Cow::Borrowed(&"_CAP_EFFECTIVE"),
+                String::from(cap).into_bytes().into_boxed_slice(),
+            );
+        }
+    }
 
     todo!("Finish parsing message")
 }
