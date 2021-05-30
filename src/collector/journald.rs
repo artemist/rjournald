@@ -1,4 +1,4 @@
-use super::util::{bytes_availaible, setsockopt_int};
+use super::util::{bytes_availaible, retrieve_process_data, setsockopt_int, Entry};
 use anyhow::{anyhow, Context};
 use async_io::Async;
 use libc::{gid_t, pid_t, uid_t, SOL_SOCKET, SO_PASSCRED};
@@ -15,8 +15,6 @@ use std::{
     str::FromStr,
 };
 use tokio::{fs::File, io::AsyncReadExt, sync::mpsc::Sender, task::spawn_blocking};
-
-type Entry = BTreeMap<Cow<'static, str>, Box<[u8]>>;
 
 pub async fn listen_journald(
     socket_location: Box<Path>,
@@ -129,6 +127,13 @@ async fn parse_message(
 ) -> anyhow::Result<Entry> {
     let mut entry = Entry::new();
 
+    entry.insert(
+        Cow::Borrowed(&"_TRANSPORT"),
+        b"journal".to_vec().into_boxed_slice(),
+    );
+
+    retrieve_process_data(&mut entry, pid, uid, gid).await;
+
     let mut field_name: &[u8] = &[];
     let mut last_idx = 0usize;
     for (idx, b) in message.iter().enumerate() {
@@ -150,70 +155,5 @@ async fn parse_message(
         }
     }
 
-    // UID could be the EUID, SUID, or the RUID. I'm not sure what journald does but just doing
-    // what we're told sounds like a good start
-    entry.insert(
-        Cow::Borrowed(&"_PID"),
-        pid.to_string().into_bytes().into_boxed_slice(),
-    );
-    entry.insert(
-        Cow::Borrowed(&"_UID"),
-        uid.to_string().into_bytes().into_boxed_slice(),
-    );
-    entry.insert(
-        Cow::Borrowed(&"_GID"),
-        gid.to_string().into_bytes().into_boxed_slice(),
-    );
-    entry.insert(
-        Cow::Borrowed(&"_TRANSPORT"),
-        b"journal".to_vec().into_boxed_slice(),
-    );
-
-    // If a process exits before we start grabbing info from /proc we could end up without any
-    // information or with information for a different process. There doesn't seem to be a clean
-    // way around this
-    let base_path = PathBuf::from_str(&format!("/proc/{}", pid))?;
-    if let Ok(exe) = tokio::fs::read_link(base_path.join(Path::new("exe"))).await {
-        entry.insert(
-            Cow::Borrowed(&"_EXE"),
-            exe.into_os_string().into_vec().into_boxed_slice(),
-        );
-    }
-
-    if let Ok(mut cmdline) = tokio::fs::read(base_path.join(Path::new("cmdline"))).await {
-        // The contents of /proc/*/cmdline always ends with a null byte which we don't want to pass through
-        cmdline.truncate(cmdline.len() - 1);
-        // For some reason systemd uses spaces to separate. We get null bytes so switch this
-        for b in cmdline.iter_mut() {
-            if *b == 0 {
-                *b = b' ';
-            }
-        }
-
-        entry.insert(Cow::Borrowed(&"_CMDLINE"), cmdline.into_boxed_slice());
-    }
-
-    if let Ok(mut comm) = tokio::fs::read(base_path.join(Path::new("comm"))).await {
-        // Remove the trailing \n
-        comm.truncate(comm.len() - 1);
-        entry.insert(Cow::Borrowed(&"_COMM"), comm.into_boxed_slice());
-    }
-
-    if let Ok(status) = tokio::fs::read_to_string(base_path.join("status")).await {
-        if let Some(cap) = status
-            .lines()
-            .filter_map(|line| line.split_once(":\t"))
-            .filter(|parts| parts.0 == "CapEff")
-            .map(|parts| parts.1.trim_start_matches('0'))
-            .map(|trimmed| if trimmed == "" { "0" } else { trimmed })
-            .next()
-        {
-            entry.insert(
-                Cow::Borrowed(&"_CAP_EFFECTIVE"),
-                String::from(cap).into_bytes().into_boxed_slice(),
-            );
-        }
-    }
-
-    todo!("Finish parsing message")
+    Ok(entry)
 }
