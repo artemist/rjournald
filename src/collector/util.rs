@@ -59,15 +59,15 @@ pub async fn retrieve_process_data(entry: &mut Entry, pid: pid_t, uid: uid_t, gi
     // UID could be the EUID, SUID, or the RUID. I'm not sure what journald does but just doing
     // what we're told sounds like a good start
     entry.insert(
-        Cow::Borrowed(&"_PID"),
+        Cow::Borrowed("_PID"),
         pid.to_string().into_bytes().into_boxed_slice(),
     );
     entry.insert(
-        Cow::Borrowed(&"_UID"),
+        Cow::Borrowed("_UID"),
         uid.to_string().into_bytes().into_boxed_slice(),
     );
     entry.insert(
-        Cow::Borrowed(&"_GID"),
+        Cow::Borrowed("_GID"),
         gid.to_string().into_bytes().into_boxed_slice(),
     );
 
@@ -75,30 +75,53 @@ pub async fn retrieve_process_data(entry: &mut Entry, pid: pid_t, uid: uid_t, gi
     // information or with information for a different process. There doesn't seem to be a clean
     // way around this
     let base_path = PathBuf::from(&format!("/proc/{}", pid));
-    if let Ok(exe) = tokio::fs::read_link(base_path.join(Path::new("exe"))).await {
+    if let Ok(exe) = tokio::fs::read_link(base_path.join("exe")).await {
         entry.insert(
-            Cow::Borrowed(&"_EXE"),
+            Cow::Borrowed("_EXE"),
             exe.into_os_string().into_vec().into_boxed_slice(),
         );
     }
 
-    if let Ok(mut cmdline) = tokio::fs::read(base_path.join(Path::new("cmdline"))).await {
+    if let Ok(mut cmdline) = tokio::fs::read(base_path.join("cmdline")).await {
         // The contents of /proc/*/cmdline always ends with a null byte which we don't want to pass through
         cmdline.truncate(cmdline.len() - 1);
         // For some reason systemd uses spaces to separate. We get null bytes so switch this
-        for b in cmdline.iter_mut() {
+        for b in &mut cmdline {
             if *b == 0 {
                 *b = b' ';
             }
         }
 
-        entry.insert(Cow::Borrowed(&"_CMDLINE"), cmdline.into_boxed_slice());
+        entry.insert(Cow::Borrowed("_CMDLINE"), cmdline.into_boxed_slice());
     }
 
-    if let Ok(mut comm) = tokio::fs::read(base_path.join(Path::new("comm"))).await {
+    if let Ok(mut comm) = tokio::fs::read(base_path.join("comm")).await {
         // Remove the trailing \n
         comm.truncate(comm.len() - 1);
-        entry.insert(Cow::Borrowed(&"_COMM"), comm.into_boxed_slice());
+        entry.insert(Cow::Borrowed("_COMM"), comm.into_boxed_slice());
+    }
+
+    if let Ok(cgroup) = tokio::fs::read(base_path.join("cmdline")).await {
+        if let Some(cgroup_path) = cgroup
+            .rsplit(|b| *b == b'\n')
+            .filter(|line| line.starts_with(b"0::"))
+            .map(|line| &line[3..])
+            .next()
+        {
+            let parsed = CgroupPath::from_slice(cgroup_path);
+            if let Some(system_slice) = parsed.system_slice {
+                entry.insert(Cow::Borrowed("_SYSTEMD_SLICE"), system_slice);
+            }
+            if let Some(system_unit) = parsed.system_unit {
+                entry.insert(Cow::Borrowed("_SYSTEMD_UNIT"), system_unit);
+            }
+            if let Some(user_slice) = parsed.user_slice {
+                entry.insert(Cow::Borrowed("_SYSTEMD_USER_SLICE"), user_slice);
+            }
+            if let Some(user_unit) = parsed.user_unit {
+                entry.insert(Cow::Borrowed("_SYSTEMD_USER_UNIT"), user_unit);
+            }
+        }
     }
 
     if let Ok(status) = tokio::fs::read_to_string(base_path.join("status")).await {
@@ -107,13 +130,43 @@ pub async fn retrieve_process_data(entry: &mut Entry, pid: pid_t, uid: uid_t, gi
             .filter_map(|line| line.split_once(":\t"))
             .filter(|parts| parts.0 == "CapEff")
             .map(|parts| parts.1.trim_start_matches('0'))
-            .map(|trimmed| if trimmed == "" { "0" } else { trimmed })
+            .map(|trimmed| if trimmed.is_empty() { "0" } else { trimmed })
             .next()
         {
             entry.insert(
-                Cow::Borrowed(&"_CAP_EFFECTIVE"),
+                Cow::Borrowed("_CAP_EFFECTIVE"),
                 String::from(cap).into_bytes().into_boxed_slice(),
             );
         }
+    }
+}
+
+#[derive(PartialEq, Debug, Default)]
+pub struct CgroupPath {
+    // We have to use slices here since there's no guaratee we get valid unicode
+    pub system_slice: Option<Box<[u8]>>,
+    pub system_unit: Option<Box<[u8]>>,
+    pub user_slice: Option<Box<[u8]>>,
+    pub user_unit: Option<Box<[u8]>>,
+}
+
+impl CgroupPath {
+    pub fn from_slice(original: &[u8]) -> Self {
+        let mut new = Self::default();
+        for part in original.split(|b| *b == b'/') {
+            if part == b"user.slice" {
+                continue;
+            }
+            if part.ends_with(b".slice") && new.system_slice.is_none() {
+                new.system_slice = Some(part.to_owned().into_boxed_slice());
+            } else if part.ends_with(b".service") && new.system_unit.is_none() {
+                new.system_unit = Some(part.to_owned().into_boxed_slice());
+            } else if part.ends_with(b".slice") && new.system_unit.is_some() {
+                new.user_slice = Some(part.to_owned().into_boxed_slice());
+            } else if part.ends_with(b".service") && new.user_slice.is_some() {
+                new.user_unit = Some(part.to_owned().into_boxed_slice());
+            }
+        }
+        new
     }
 }

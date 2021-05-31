@@ -2,18 +2,11 @@ use super::util::{bytes_availaible, retrieve_process_data, setsockopt_int, Entry
 use anyhow::{anyhow, Context};
 use async_io::Async;
 use libc::{gid_t, pid_t, uid_t, SOL_SOCKET, SO_PASSCRED};
-use std::{
-    borrow::Cow, cmp::max, collections::BTreeMap, io::IoSliceMut, os::unix::prelude::FromRawFd,
-    path::Path, path::PathBuf, sync::Arc,
+use std::os::unix::{
+    net::{AncillaryData, SocketAncillary, UnixDatagram},
+    prelude::{AsRawFd, FromRawFd},
 };
-use std::{
-    os::unix::{
-        ffi::OsStringExt,
-        net::{AncillaryData, SocketAncillary, UnixDatagram},
-        prelude::AsRawFd,
-    },
-    str::FromStr,
-};
+use std::{borrow::Cow, cmp::max, io::IoSliceMut, path::Path, sync::Arc};
 use tokio::{fs::File, io::AsyncReadExt, sync::mpsc::Sender, task::spawn_blocking};
 
 pub async fn listen_journald(
@@ -128,7 +121,7 @@ async fn parse_message(
     let mut entry = Entry::new();
 
     entry.insert(
-        Cow::Borrowed(&"_TRANSPORT"),
+        Cow::Borrowed("_TRANSPORT"),
         b"journal".to_vec().into_boxed_slice(),
     );
 
@@ -144,7 +137,7 @@ async fn parse_message(
             last_idx = idx + 1;
         }
         if b == &b'\n' && field_name != b"" {
-            if field_name.len() > 0 && field_name[0] != b'_' {
+            if !field_name.is_empty() && field_name[0] != b'_' {
                 if let Ok(field_name_str) = String::from_utf8(field_name.to_owned()) {
                     entry.insert(
                         Cow::Owned(field_name_str),
@@ -155,5 +148,9 @@ async fn parse_message(
         }
     }
 
-    Ok(entry)
+    if entry.contains_key(&Cow::Borrowed("MESSAGE")) {
+        Ok(entry)
+    } else {
+        Err(anyhow!("No MESSAGE field in native"))
+    }
 }
