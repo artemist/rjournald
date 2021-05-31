@@ -3,7 +3,7 @@ use libc::{c_void, gid_t, pid_t, setsockopt, uid_t};
 use nix::ioctl_read_bad;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::{mem::size_of, os::unix::ffi::OsStringExt, os::unix::prelude::RawFd};
 
 pub type Entry = BTreeMap<Cow<'static, str>, Box<[u8]>>;
@@ -102,6 +102,10 @@ pub async fn retrieve_process_data(entry: &mut Entry, pid: pid_t, uid: uid_t, gi
     }
 
     if let Ok(cgroup) = tokio::fs::read(base_path.join("cmdline")).await {
+        entry.insert(
+            Cow::Borrowed("_SYSTEMD_CGROUP"),
+            cgroup.clone().into_boxed_slice(),
+        );
         if let Some(cgroup_path) = cgroup
             .rsplit(|b| *b == b'\n')
             .filter(|line| line.starts_with(b"0::"))
@@ -154,19 +158,26 @@ impl CgroupPath {
     pub fn from_slice(original: &[u8]) -> Self {
         let mut new = Self::default();
         for part in original.split(|b| *b == b'/') {
-            if part == b"user.slice" {
+            if part.is_empty() {
                 continue;
             }
-            if part.ends_with(b".slice") && new.system_slice.is_none() {
+
+            if part.ends_with(b".slice") && new.system_unit.is_none() {
                 new.system_slice = Some(part.to_owned().into_boxed_slice());
-            } else if part.ends_with(b".service") && new.system_unit.is_none() {
+            } else if !part.ends_with(b".slice") && new.user_slice.is_none() {
                 new.system_unit = Some(part.to_owned().into_boxed_slice());
             } else if part.ends_with(b".slice") && new.system_unit.is_some() {
                 new.user_slice = Some(part.to_owned().into_boxed_slice());
-            } else if part.ends_with(b".service") && new.user_slice.is_some() {
+            } else if !part.ends_with(b".slice") && new.user_slice.is_some() {
                 new.user_unit = Some(part.to_owned().into_boxed_slice());
             }
         }
+
+        // Special root slice, systemd users this so I should clone it
+        if new.system_slice.is_none() {
+            new.system_slice = Some(Box::new(*b"-.slice"));
+        }
+
         new
     }
 }

@@ -35,7 +35,7 @@ impl BinaryWriter {
             .write(true)
             .open(full_filename)?;
 
-        // This is safe as the file will not be dropped ujtil after this is run.
+        // This is safe as the file will not be dropped until after this is run.
         ftruncate(backing_file.as_raw_fd(), Self::DEFAULT_FILE_SIZE)?;
 
         let map = unsafe { MmapMut::map_mut(&backing_file)? };
@@ -51,5 +51,7 @@ impl BinaryWriter {
         Header::from_slice(&self.map)
     }
 
-    pub fn write_header(&mut self, new_header: &Header) {}
+    pub fn write_header(&mut self, new_header: &Header) {
+        unimplemented!("{:?}", new_header)
+    }
 }
