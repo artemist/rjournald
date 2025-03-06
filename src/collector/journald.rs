@@ -112,6 +112,13 @@ async fn read_message(listener: Arc<Async<UnixDatagram>>) -> anyhow::Result<Entr
     parse_message(&buf, cred.get_pid(), cred.get_uid(), cred.get_gid()).await
 }
 
+enum ParseState {
+    ReadingName { start: usize },
+    ReadingLength { num_done: u8, current: u64 },
+    ReadingToNewline { start: usize },
+    ReadingToLength { start: usize, end: usize },
+}
+
 async fn parse_message(
     message: &[u8],
     pid: pid_t,
@@ -128,14 +135,32 @@ async fn parse_message(
     retrieve_process_data(&mut entry, pid, uid, gid).await;
 
     let mut field_name: &[u8] = &[];
-    let mut last_idx = 0usize;
+    let mut state = ParseState::ReadingName { start: 0 };
+
     for (idx, b) in message.iter().enumerate() {
-        if b == &b'=' && field_name == b"" {
-            // We'll parse it as utf-8 later
-            field_name = &message[last_idx..idx];
-            // Skip the equals sign
-            last_idx = idx + 1;
-        }
+        state = match state {
+            ParseState::ReadingName { start } => 
+                if *b == b'=' {
+                    field_name = &message[start..idx];
+                    ParseState::ReadingToNewline { start: idx + 1 }
+                } else if *b == b'\n' {
+                    ParseState::ReadingLength { num_done: 0, current: 0 }
+                } else {
+                    ParseState::ReadingName { start }
+                },
+            ParseState::ReadingLength { num_done, current } => if num_done == 7 {
+                let len = current >> 8 | (*b as u64) << 56;
+                ParseState::ReadingToLength { start: idx + 1, end: idx + (len as usize)}
+            } else {
+                ParseState::ReadingLength { num_done: num_done + 1 , current: current >> 8 | (*b as u64) << 56}
+            },
+            ParseState::ReadingToNewline { start } => todo!(),
+            ParseState::ReadingToLength { start, end } => if idx == end {
+                todo!()
+            } else {
+                ParseState::ReadingToLength { start, end }
+            }
+        };
         if b == &b'\n' && field_name != b"" {
             if !field_name.is_empty() && field_name[0] != b'_' {
                 if let Ok(field_name_str) = String::from_utf8(field_name.to_owned()) {
